@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha512"
 	"fmt"
+	"hash/crc64"
 	"io"
 	"os"
 	"syscall"
@@ -223,6 +224,11 @@ func HashFileInterval(file FileIoProcessor, dataInterval Interval) ([]byte, erro
 func HashData(data []byte) ([]byte, error) {
 	sum := sha512.Sum512(data)
 	return sum[:], nil
+}
+
+func HashDataCRC64(data []byte) uint64 {
+	table := crc64.MakeTable(crc64.ECMA)
+	return crc64.Checksum(data, table)
 }
 
 func GetFileLayout(ctx context.Context, file FileIoProcessor) (<-chan FileInterval, <-chan error, error) {

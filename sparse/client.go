@@ -54,6 +54,8 @@ type syncClient struct {
 
 	httpClient        *http.Client
 	httpClientTimeout int
+
+	db *SyncDB
 }
 
 type ReaderWriterAt interface {
@@ -77,6 +79,10 @@ func newHTTPClient(httpClientTimeout int) *http.Client {
 
 func newSyncClient(remote string, sourceName string, size int64, rw ReaderWriterAt, directIO bool, httpClientTimeout int,
 	recordedChangeTime, recordedChecksumMethod, recordedChecksum string, syncBatchSize int64, numSyncWorkers int) *syncClient {
+	dbClient, err := NewSyncDB(sourceName)
+	if err != nil {
+		log.WithError(err).Error("Failed to initialize sync database")
+	}
 	return &syncClient{
 		remote:     remote,
 		sourceName: sourceName,
@@ -92,6 +98,8 @@ func newSyncClient(remote string, sourceName string, size int64, rw ReaderWriter
 
 		syncBatchSize:  syncBatchSize,
 		numSyncWorkers: numSyncWorkers,
+
+		db: dbClient,
 	}
 }
 
@@ -368,6 +376,9 @@ func (client *syncClient) close() {
 		_, _ = io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 	}
+	if client.db != nil {
+		client.db.Close()
+	}
 }
 
 func (client *syncClient) syncHoleInterval(holeInterval Interval) error {
@@ -440,10 +451,12 @@ func (client *syncClient) getServerRecordedMetadata() ([]byte, error) {
 	return metadata, err
 }
 
-func (client *syncClient) writeData(dataInterval Interval, data []byte) error {
+func (client *syncClient) writeData(dataInterval Interval, data []byte, sourceName string, dataChecksum uint64) error {
 	queries := make(map[string]string)
 	queries["begin"] = strconv.FormatInt(dataInterval.Begin, 10)
 	queries["end"] = strconv.FormatInt(dataInterval.End, 10)
+	queries["sourceName"] = sourceName
+	queries["dataChecksum"] = strconv.FormatUint(dataChecksum, 10)
 	resp, err := client.sendHTTPRequest("POST", "writeData", queries, data)
 	if err != nil {
 		return errors.Wrap(err, "failed to write data")
@@ -486,8 +499,17 @@ func (client *syncClient) syncDataInterval(dataInterval Interval) error {
 		}
 
 		if dataBuffer != nil {
+			var dataChecksum uint64
+			var imageName string
+			if client.db != nil {
+				imageName = client.sourceName
+				dataChecksum = HashDataCRC64(dataBuffer)
+				if err := client.db.SaveIntervalChecksum(batchInterval.Begin, batchInterval.End, dataChecksum); err != nil {
+					log.WithError(err).Warnf("Failed to save checksum for interval %+v during fresh sync", batchInterval)
+				}
+			}
 			log.Tracef("Sending dataBuffer size: %d", len(dataBuffer))
-			if err := client.writeData(batchInterval, dataBuffer); err != nil {
+			if err := client.writeData(batchInterval, dataBuffer, imageName, dataChecksum); err != nil {
 				return errors.Wrapf(err, "failed to write data interval %+v", batchInterval)
 			}
 		}

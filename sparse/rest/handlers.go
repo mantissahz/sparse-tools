@@ -51,6 +51,20 @@ func getQueryChecksum(request *http.Request) string {
 	return queryParams.Get("checksum")
 }
 
+func getQueryDataChecksum(request *http.Request) (uint64, error) {
+	queryParams := request.URL.Query()
+	dataChecksumStr := queryParams.Get("dataChecksum")
+	if dataChecksumStr == "" {
+		return 0, fmt.Errorf("queryParams dataChecksum does not exist")
+	}
+	dataChecksum, err := strconv.ParseUint(dataChecksumStr, 10, 64)
+	if err != nil {
+		return 0, errors.Wrapf(err, "failed to parse dataChecksum string %v", dataChecksumStr)
+	}
+
+	return dataChecksum, nil
+}
+
 func getQueryInterval(request *http.Request) (sparse.Interval, error) {
 	var interval sparse.Interval
 
@@ -260,6 +274,25 @@ func (server *SyncServer) doWriteData(request *http.Request) error {
 	err = sparse.WriteDataInterval(server.fileIo, remoteDataInterval, data)
 	if err != nil {
 		return errors.Wrapf(err, "failed to write data interval %+v", remoteDataInterval)
+	}
+
+	sourceName := request.URL.Query().Get("sourceName")
+	if sourceName != "" {
+		dbClient, err := sparse.NewSyncDB(sourceName)
+		if err != nil {
+			log.WithError(err).Error("Failed to initialize sync database")
+		} else {
+			defer dbClient.Close()
+
+			checksum, err := getQueryDataChecksum(request)
+			if err != nil {
+				log.WithError(err).Errorf("Failed to parse checksum string %v", checksum)
+			} else {
+				if err := dbClient.SaveIntervalChecksum(remoteDataInterval.Begin, remoteDataInterval.End, checksum); err != nil {
+					log.WithError(err).Errorf("Failed to save interval checksum for interval %+v", remoteDataInterval)
+				}
+			}
+		}
 	}
 
 	if !server.fileAlreadyExists {
